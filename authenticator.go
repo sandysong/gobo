@@ -2,10 +2,14 @@ package gobo
 
 import (
 	"encoding/json"
+    "encoding/base64"
+    "crypto/hmac"
+    "crypto/sha256"
 	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+    "strings"
 )
 
 // Authenticator结构体实现了微博应用授权功能
@@ -13,81 +17,101 @@ type Authenticator struct {
 	redirectUri  string
 	clientId     string
 	clientSecret string
-	initialized  bool
+    accessToken  string
+    refreshToken string
 	httpClient   *http.Client
 }
 
-// 初始化结构体
-//
-// 在调用其它函数之前必须首先初始化。
-func (auth *Authenticator) Init(redirectUri string, clientId string, clientSecret string) error {
-	// 检查结构体是否已经初始化
-	if auth.initialized {
-		return &ErrorString{"Authenticator结构体已经初始化"}
-	}
-
-	auth.redirectUri = redirectUri
-	auth.clientId = clientId
-	auth.clientSecret = clientSecret
-	auth.httpClient = new(http.Client)
-	auth.initialized = true
-	return nil
+func NewAuthenticator(clientId string, clientSecret string, args ...string) *Authenticator {
+    a := new(Authenticator)
+    a.clientId = clientId
+    a.clientSecret = clientSecret
+    if len(args) >= 1 {
+        a.accessToken = args[0]
+    }
+    if len(args) >= 2 {
+        a.refreshToken = args[1]
+    }
+    a.httpClient = new(http.Client)
+    return a
 }
 
-// 得到授权URI
-func (auth *Authenticator) Authorize() (string, error) {
-	// 检查结构体是否初始化
-	if !auth.initialized {
-		return "", &ErrorString{"Authenticator结构体尚未初始化"}
-	}
 
-	return fmt.Sprintf("%s/oauth2/authorize?redirect_uri=%s&response_type=code&client_id=%s", ApiDomain, auth.redirectUri, auth.clientId), nil
-}
-
-// 从授权码得到访问令牌
-func (auth *Authenticator) AccessToken(code string) (AccessToken, error) {
-	// 检查结构体是否初始化
-	token := AccessToken{}
-	if !auth.initialized {
-		return token, &ErrorString{"Authenticator结构体尚未初始化"}
-	}
-
-	// 生成请求URI
+func (a *Authenticator) GetAuthorizeURL(redirect_uri string, args ...string) string {
 	queries := url.Values{}
-	queries.Add("client_id", auth.clientId)
-	queries.Add("client_secret", auth.clientSecret)
-	queries.Add("redirect_uri", auth.redirectUri)
-	queries.Add("grant_type", "authorization_code")
-	queries.Add("code", code)
 
-	// 发送请求
-	err := auth.sendPostHttpRequest("oauth2/access_token", queries, &token)
-	return token, err
+	queries.Add("redirect_uri", redirect_uri)
+    queries.Add("client_id", a.clientId)
+    if len(args) >= 1 {
+        queries.Add("response_type", args[0])
+    } else {
+        queries.Add("response_type", "code")
+    }
+    if len(args) >= 2 {
+        queries.Add("state", args[1])
+    }
+    if len(args) >= 3 {
+        queries.Add("display", args[2])
+    }
+
+    return fmt.Sprintf("%s/oauth2/authorize?%s", ApiDomain, queries.Encode())
+
+}
+
+func (a *Authenticator) GetAccessToken(grant_type string, args ...string) (*AccessToken, error) {
+    queries := url.Values{}
+
+    switch(grant_type) {
+    case "code":
+        queries.Add("grant_type", "authorization_code")
+        if len(args) >= 1 {
+            queries.Add("code", args[0])
+        }
+        if len(args) >= 2 {
+            queries.Add("redirect_uri", args[1])
+        }
+    case "token":
+        queries.Add("grant_type", "refresh_token")
+        if len(args) >= 1 {
+            queries.Add("refresh_token", args[0])
+        }
+    case "password":
+        queries.Add("grant_type", "password")
+        if len(args) >= 1 {
+            queries.Add("username", args[0])
+        }
+        if len(args) >= 2 {
+            queries.Add("password", args[1])
+        }
+    default:
+        return nil, &ErrorString{"grant_type参数错误"}
+    }
+
+    token := new(AccessToken)
+    err := a.sendPostHttpRequest("oauth2/access_token", queries, token)
+    if err != nil {
+        return nil, err
+    }
+    return token, nil
 }
 
 // 得到访问令牌对应的信息
-func (auth *Authenticator) GetTokenInfo(token string) (AccessTokenInfo, error) {
-	// 检查结构体是否初始化
-	info := AccessTokenInfo{}
-	if !auth.initialized {
-		return info, &ErrorString{"Authenticator结构体尚未初始化"}
-	}
-
+func (a *Authenticator) GetTokenInfo(token string) (*AccessTokenInfo, error) {
 	// 生成请求URI
 	queries := url.Values{}
 	queries.Add("access_token", token)
 
+    info := new(AccessTokenInfo)
 	// 发送请求
-	err := auth.sendPostHttpRequest("oauth2/get_token_info", queries, &info)
-	return info, err
+	err := a.sendPostHttpRequest("oauth2/get_token_info", queries, info)
+    if err != nil {
+        return nil, err
+    }
+	return info, nil
 }
 
 // 解除访问令牌的授权
-func (auth *Authenticator) Revokeoauth2(token string) error {
-	// 检查结构体是否初始化
-	if !auth.initialized {
-		return &ErrorString{"Authenticator结构体尚未初始化"}
-	}
+func (a *Authenticator) RevokeOAuth2(token string) error {
 
 	// 生成请求URI
 	queries := url.Values{}
@@ -98,8 +122,36 @@ func (auth *Authenticator) Revokeoauth2(token string) error {
 		Result string
 	}
 	var result Result
-	err := auth.sendPostHttpRequest("oauth2/revokeoauth2", queries, &result)
+	err := a.sendPostHttpRequest("oauth2/revokeoauth2", queries, &result)
 	return err
+}
+
+func (a *Authenticator) ParseSignedRequest(signed_request string) (*SignedRequest, error) {
+    res := strings.SplitN(signed_request, ".", 2)
+    sig := a.base64Decode(res[0])
+    sr := new(SignedRequest)
+    err := json.Unmarshal(a.base64Decode(res[1]), sr)
+    if err != nil {
+        return nil, err
+    }
+    if strings.ToUpper(sr.Algorithm) != "HMAC-SHA256" {
+        return nil, &ErrorString{"algorithm should be HMAC_SHA256"}
+    }
+    mac := hmac.New(sha256.New, []byte(a.clientSecret))
+    mac.Write([]byte(res[1]))
+    if hmac.Equal(sig, mac.Sum(nil)) {
+        return sr, nil
+    }
+    return nil, &ErrorString{"signed check wrong"}
+}
+
+func (a *Authenticator) base64Decode(str string) []byte {
+    s := strings.Replace(strings.Replace(str + strings.Repeat("=", 4 - len(str) % 4), "-", "+", -1), "_", "/", -1)
+    data, err := base64.StdEncoding.DecodeString(s)
+    if err != nil {
+        return nil
+    }
+    return data
 }
 
 func (auth *Authenticator) sendPostHttpRequest(apiName string, queries url.Values, response interface{}) error {

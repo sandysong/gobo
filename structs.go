@@ -179,3 +179,12 @@ type Visible struct {
 type Pic_Url struct {
 	Thumbnail_Pic string
 }
+
+type SignedRequest struct {
+    User        *User
+    Algorithm   string
+    IssuedAt    int
+    Referer     string
+    Origin      string
+    Ouid        int64
+}
