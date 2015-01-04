@@ -181,10 +181,14 @@ type Pic_Url struct {
 }
 
 type SignedRequest struct {
-    User        *User
     Algorithm   string
-    IssuedAt    int
+    Issued_At   int
     Referer     string
     Origin      string
-    Ouid        int64
+    Ouid        int64 `json:",string"`
+    User_Id     int64
+    Expires     int
+    Oauth_Token string
+    Scope       string
+    Ext_Data    string
 }

@@ -128,6 +128,9 @@ func (a *Authenticator) RevokeOAuth2(token string) error {
 
 func (a *Authenticator) ParseSignedRequest(signed_request string) (*SignedRequest, error) {
     res := strings.SplitN(signed_request, ".", 2)
+    if len(res) != 2 {
+        return nil, &ErrorString{"signed_request error"}
+    }
     sig := a.base64Decode(res[0])
     sr := new(SignedRequest)
     err := json.Unmarshal(a.base64Decode(res[1]), sr)
@@ -146,7 +149,14 @@ func (a *Authenticator) ParseSignedRequest(signed_request string) (*SignedReques
 }
 
 func (a *Authenticator) base64Decode(str string) []byte {
-    s := strings.Replace(strings.Replace(str + strings.Repeat("=", 4 - len(str) % 4), "-", "+", -1), "_", "/", -1)
+    var s string
+    l := 4 - len(str) % 4
+    if l != 4 {
+        s = str + strings.Repeat("=", l)
+    } else {
+        s = str
+    }
+    s = strings.Replace(strings.Replace(s, "-", "+", -1), "_", "/", -1)
     data, err := base64.StdEncoding.DecodeString(s)
     if err != nil {
         return nil
